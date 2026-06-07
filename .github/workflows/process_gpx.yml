@@ -1,0 +1,55 @@
+name: GPX → HTML Map
+
+# Пайплайн запускается автоматически при добавлении или изменении
+# любого .gpx-файла в папке data/
+on:
+  push:
+    paths:
+      - 'data/**.gpx'
+
+permissions:
+  contents: write   # нужно для коммита output/ обратно в репо
+  pages: write      # нужно для публикации на GitHub Pages
+  id-token: write   # нужно для OIDC-аутентификации Pages
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      # 1. Получить содержимое репозитория
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Установить Python 3.11
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Найти GPX-файл и запустить скрипт
+      #    Если файлов несколько — обрабатывается первый найденный
+      - name: Process GPX → HTML
+        run: |
+          GPX=$(find data/ -name "*.gpx" | sort | head -1)
+          if [ -z "$GPX" ]; then
+            echo "Ошибка: GPX-файл не найден в папке data/"
+            exit 1
+          fi
+          echo "Обрабатывается файл: $GPX"
+          python scripts/gpx_to_html.py "$GPX" output/index.html
+
+      # 4. Загрузить папку output/ как артефакт для GitHub Pages
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/
+
+      # 5. Опубликовать на GitHub Pages
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
