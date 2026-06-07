@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#https://github.com/aydarabdullin/gpx-map-pipeline.git
 """
 gpx_to_html.py — конвертер GPX-трека в автономную HTML-страницу с картой.
 
