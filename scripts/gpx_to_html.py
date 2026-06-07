@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#https://github.com/aydarabdullin/gpx-map-pipeline.git
 """
 gpx_to_html.py — конвертер GPX-трека в автономную HTML-страницу с картой.
 
@@ -13,11 +12,30 @@ gpx_to_html.py — конвертер GPX-трека в автономную HTM
 """
 
 import sys
+import os
 import math
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime, timezone
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# КОНФИГУРАЦИЯ
+#
+# Токен MapBox читается из переменной окружения MAPBOX_TOKEN.
+# Никогда не вписывайте токен прямо в этот файл — он попадёт в публичный репо.
+#
+# Локальная разработка (VS Code):
+#   export MAPBOX_TOKEN="pk.eyJ1Ijoiваш_токен..."   # macOS/Linux
+#   $env:MAPBOX_TOKEN="pk.eyJ1Ijoiваш_токен..."     # Windows PowerShell
+#
+# GitHub Actions:
+#   Settings → Secrets and variables → Actions → New repository secret
+#   Name: MAPBOX_TOKEN  /  Value: pk.eyJ1Ijoiваш_токен...
+# ─────────────────────────────────────────────────────────────────────────────
+MAPBOX_TOKEN = os.environ.get("MAPBOX_TOKEN", "")
+MAPBOX_STYLE = "mapbox/light-v11"  # стиль карты
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +192,7 @@ def calc_stats(points: list) -> dict:
 def render_html(track_name: str, points: list, stats: dict, out_path: Path):
     """
     Генерирует автономный HTML-файл с:
-      - интерактивной картой Leaflet (3 подложки на выбор)
+      - интерактивной картой Leaflet на подложке MapBox Light
       - треком с градиентом по высоте
       - маркерами старта и финиша
       - графиком профиля высот (Chart.js)
@@ -182,350 +200,287 @@ def render_html(track_name: str, points: list, stats: dict, out_path: Path):
       - панелью статистики
     """
     # Подготовка данных для JS
-    latlngs_js  = json.dumps([[p["lat"], p["lon"]] for p in points], separators=(",", ":"))
-    eles_js     = json.dumps([p["ele"] for p in points],             separators=(",", ":"))
-    dist_km_js  = json.dumps(stats["cum_dist_km"],                   separators=(",", ":"))
+    latlngs_js = json.dumps([[p["lat"], p["lon"]] for p in points], separators=(",", ":"))
+    eles_js    = json.dumps([p["ele"] for p in points],             separators=(",", ":"))
+    dist_km_js = json.dumps(stats["cum_dist_km"],                   separators=(",", ":"))
 
-    html = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>{track_name}</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #f0f4f8;
-      color: #1a202c;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }}
+    # Подставляем токен и стиль из конфига (строковая интерполяция Python,
+    # не f-строка внутри HTML — используем .format() чтобы не конфликтовать
+    # с фигурными скобками Leaflet/JS)
+    mapbox_url = (
+        "https://api.mapbox.com/styles/v1/"
+        + MAPBOX_STYLE
+        + "/tiles/{z}/{x}/{y}@2x?access_token="
+        + MAPBOX_TOKEN
+    )
 
-    /* ── Шапка ── */
-    header {{
-      background: linear-gradient(135deg, #1e4d8c 0%, #2b6cb0 100%);
-      color: #fff;
-      padding: 13px 22px;
-      display: flex;
-      align-items: center;
-      gap: 13px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-      flex-shrink: 0;
-    }}
-    header svg {{ flex-shrink: 0; }}
-    header h1 {{ font-size: 1.2rem; font-weight: 700; }}
-    header p  {{ font-size: 0.77rem; opacity: 0.82; margin-top: 2px; }}
-
-    /* ── Статистика ── */
-    .stats {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 10px 18px;
-      background: #fff;
-      border-bottom: 1px solid #e2e8f0;
-      flex-shrink: 0;
-    }}
-    .stat {{
-      flex: 1 1 90px;
-      background: #f7fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 7px 12px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }}
-    .stat-value {{ font-size: 1.1rem; font-weight: 700; color: #2b6cb0; }}
-    .stat-label {{ font-size: 0.65rem; color: #718096; text-transform: uppercase;
-                   letter-spacing: 0.05em; margin-top: 2px; white-space: nowrap; }}
-
-    /* ── Основная область ── */
-    .main {{ display: flex; flex-direction: column; flex: 1 1 auto; overflow: hidden; }}
-
-    #map {{ flex: 1 1 auto; z-index: 0; }}
-
-    /* ── График высот ── */
-    .elev-panel {{
-      flex: 0 0 180px;
-      background: #fff;
-      border-top: 1px solid #e2e8f0;
-      padding: 10px 16px 8px;
-      display: flex;
-      flex-direction: column;
-    }}
-    .elev-panel h2 {{
-      font-size: 0.7rem; font-weight: 600; color: #4a5568;
-      text-transform: uppercase; letter-spacing: 0.06em;
-      margin-bottom: 6px; flex-shrink: 0;
-    }}
-    .elev-wrap {{ position: relative; flex: 1 1 auto; }}
-    #elevChart {{ width: 100% !important; height: 100% !important; }}
-
-    /* ── Переключатель слоёв ── */
-    #layerCtrl {{
-      position: absolute; top: 12px; right: 12px; z-index: 900;
-      background: rgba(255,255,255,0.96); border-radius: 8px;
-      padding: 8px 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.14);
-      font-size: 0.78rem;
-    }}
-    #layerCtrl strong {{ display: block; color: #4a5568; margin-bottom: 5px; font-size: 0.75rem; }}
-    #layerCtrl label  {{ display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 3px; }}
-    #layerCtrl input  {{ accent-color: #2b6cb0; }}
-
-    /* ── Всплывашки Leaflet ── */
-    .leaflet-popup-content-wrapper {{ border-radius: 10px; font-size: 0.82rem; }}
-    .popup b {{ color: #2b6cb0; }}
-  </style>
-</head>
-<body>
-
-<header>
-  <svg width="38" height="38" viewBox="0 0 38 38" fill="none">
-    <circle cx="19" cy="19" r="19" fill="rgba(255,255,255,0.15)"/>
-    <path d="M19 9C14 9 10 13 10 18C10 24 19 32 19 32C19 32 28 24 28 18C28 13 24 9 19 9Z"
-          fill="#fff" opacity="0.9"/>
-    <circle cx="19" cy="18" r="4.5" fill="#2b6cb0"/>
-  </svg>
-  <div>
-    <h1>{track_name}</h1>
-    <p>{stats["date_str"]} &nbsp;·&nbsp; {stats["point_count"]} точек GPS</p>
-  </div>
-</header>
-
-<div class="stats">
-  <div class="stat">
-    <span class="stat-value">{stats["total_dist_km"]:.2f} км</span>
-    <span class="stat-label">Расстояние</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">{stats["duration_str"]}</span>
-    <span class="stat-label">Длительность</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">{stats["avg_speed_kmh"]:.1f} км/ч</span>
-    <span class="stat-label">Ср. скорость</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">{stats["ele_max"]:.0f} м</span>
-    <span class="stat-label">Макс. высота</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">{stats["ele_min"]:.0f} м</span>
-    <span class="stat-label">Мин. высота</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">+{stats["ascent"]:.0f} м</span>
-    <span class="stat-label">Набор высоты</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">−{stats["descent"]:.0f} м</span>
-    <span class="stat-label">Сброс высоты</span>
-  </div>
-  <div class="stat">
-    <span class="stat-value">{stats["point_count"]}</span>
-    <span class="stat-label">Точек трека</span>
-  </div>
-</div>
-
-<div class="main">
-  <div style="position:relative; flex:1 1 auto; min-height:0;">
-    <div id="map" style="height:100%;"></div>
-    <div id="layerCtrl">
-      <strong>Подложка карты</strong>
-      <label><input type="radio" name="layer" value="osm"  checked> OpenStreetMap</label>
-      <label><input type="radio" name="layer" value="sat"> Спутник (Esri)</label>
-      <label><input type="radio" name="layer" value="topo"> Рельеф (CartoDB)</label>
-    </div>
-  </div>
-  <div class="elev-panel">
-    <h2>Профиль высот — наведите курсор для позиции на карте</h2>
-    <div class="elev-wrap">
-      <canvas id="elevChart"></canvas>
-    </div>
-  </div>
-</div>
-
-<script>
-// ── Данные трека (встроены скриптом, внешних файлов не нужно) ─────────────
-const LATLNGS = {latlngs_js};
-const ELES    = {eles_js};
-const DIST_KM = {dist_km_js};
-
-const ELE_MIN = Math.min(...ELES);
-const ELE_MAX = Math.max(...ELES);
-
-// ── Карта ─────────────────────────────────────────────────────────────────
-const centerLat = LATLNGS.reduce((s,p) => s+p[0], 0) / LATLNGS.length;
-const centerLon = LATLNGS.reduce((s,p) => s+p[1], 0) / LATLNGS.length;
-
-const map = L.map('map').setView([centerLat, centerLon], 14);
-
-// Три подложки на выбор
-const LAYERS = {{
-  osm:  L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-          attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a>',
-          maxZoom: 19
-        }}),
-  sat:  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
-          attribution: '© Esri',
-          maxZoom: 19
-        }}),
-  topo: L.tileLayer('https://{{s}}.basemaps.cartocdn.com/rastertiles/voyager/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-          attribution: '© CartoDB',
-          maxZoom: 19
-        }})
-}};
-LAYERS.osm.addTo(map);
-
-document.querySelectorAll('input[name="layer"]').forEach(radio => {{
-  radio.addEventListener('change', () => {{
-    Object.values(LAYERS).forEach(l => map.removeLayer(l));
-    LAYERS[radio.value].addTo(map);
-  }});
-}});
-
-// ── Трек с градиентом цвета по высоте ─────────────────────────────────────
-function eleColor(ele) {{
-  // зелёный (низко) → жёлтый → красный (высоко)
-  const t = Math.max(0, Math.min(1, (ele - ELE_MIN) / (ELE_MAX - ELE_MIN || 1)));
-  const r = Math.round(30  + t * 210);
-  const g = Math.round(180 - t * 140);
-  const b = Math.round(60  - t * 40);
-  return `rgb(${{r}},${{g}},${{b}})`;
-}}
-
-for (let i = 1; i < LATLNGS.length; i++) {{
-  L.polyline([LATLNGS[i-1], LATLNGS[i]], {{
-    color:   eleColor(ELES[i]),
-    weight:  5,
-    opacity: 0.92,
-    lineCap: 'round',
-    lineJoin: 'round'
-  }}).addTo(map);
-}}
-
-// Тонкая обводка для читаемости на тёмных подложках
-L.polyline(LATLNGS, {{
-  color: 'rgba(0,0,0,0.15)', weight: 7, opacity: 1, lineCap: 'round'
-}}).addTo(map);
-
-// ── Маркеры старта / финиша ────────────────────────────────────────────────
-function circleIcon(color) {{
-  return L.divIcon({{
-    className: '',
-    html: `<div style="width:16px;height:16px;border-radius:50%;
-                background:${{color}};border:3px solid #fff;
-                box-shadow:0 1px 5px rgba(0,0,0,.4)"></div>`,
-    iconAnchor: [8, 8]
-  }});
-}}
-
-L.marker(LATLNGS[0], {{icon: circleIcon('#22c55e')}}).addTo(map)
-  .bindPopup(`<div class="popup"><b>Старт</b><br>
-    Высота: ${{ELES[0]}} м<br>
-    Пройдено: 0.00 км</div>`);
-
-L.marker(LATLNGS[LATLNGS.length-1], {{icon: circleIcon('#ef4444')}}).addTo(map)
-  .bindPopup(`<div class="popup"><b>Финиш</b><br>
-    Высота: ${{ELES[ELES.length-1]}} м<br>
-    Пройдено: ${{DIST_KM[DIST_KM.length-1].toFixed(2)}} км</div>`);
-
-map.fitBounds(L.polyline(LATLNGS).getBounds(), {{padding: [28, 28]}});
-
-// ── Скользящий маркер (синхронизация карта ↔ график) ─────────────────────
-const sliderMarker = L.marker(LATLNGS[0], {{
-  icon: L.divIcon({{
-    className: '',
-    html: `<div style="width:13px;height:13px;border-radius:50%;
-                background:#2b6cb0;border:2px solid #fff;
-                box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>`,
-    iconAnchor: [6.5, 6.5]
-  }}),
-  interactive: false,
-  zIndexOffset: 1000
-}}).addTo(map);
-sliderMarker.setOpacity(0);
-
-// ── График профиля высот ──────────────────────────────────────────────────
-const ctx = document.getElementById('elevChart').getContext('2d');
-
-const gradient = ctx.createLinearGradient(0, 0, 0, 160);
-gradient.addColorStop(0,   'rgba(43,108,176,0.35)');
-gradient.addColorStop(0.6, 'rgba(43,108,176,0.12)');
-gradient.addColorStop(1,   'rgba(43,108,176,0.02)');
-
-new Chart(ctx, {{
-  type: 'line',
-  data: {{
-    labels: DIST_KM,
-    datasets: [{{
-      data: ELES,
-      borderColor: '#2b6cb0',
-      borderWidth: 2,
-      backgroundColor: gradient,
-      fill: true,
-      pointRadius: 0,
-      tension: 0.35
-    }}]
-  }},
-  options: {{
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    interaction: {{ mode: 'index', intersect: false }},
-    plugins: {{
-      legend: {{ display: false }},
-      tooltip: {{
-        callbacks: {{
-          title: items => parseFloat(items[0].label).toFixed(2) + ' км',
-          label: items => 'Высота: ' + items.raw + ' м'
-        }}
-      }}
-    }},
-    scales: {{
-      x: {{
-        ticks: {{
-          maxTicksLimit: 9,
-          callback: (v) => DIST_KM[v] !== undefined
-            ? Number(DIST_KM[v]).toFixed(1) + ' км' : ''
-        }},
-        grid: {{ color: '#edf2f7' }}
-      }},
-      y: {{
-        ticks: {{ callback: v => v + ' м', maxTicksLimit: 5 }},
-        grid: {{ color: '#edf2f7' }}
-      }}
-    }},
-    // При наведении — двигаем маркер на карте
-    onHover: (event, elements) => {{
-      if (elements.length) {{
-        const idx = elements[0].index;
-        sliderMarker.setLatLng(LATLNGS[idx]);
-        sliderMarker.setOpacity(1);
-      }} else {{
-        sliderMarker.setOpacity(0);
-      }}
-    }}
-  }}
-}});
-</script>
-</body>
-</html>"""
+    html = (
+        "<!DOCTYPE html>\n"
+        '<html lang="ru">\n'
+        "<head>\n"
+        '  <meta charset="UTF-8"/>\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>\n'
+        f"  <title>{track_name}</title>\n"
+        '  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>\n'
+        '  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>\n'
+        '  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>\n'
+        "  <style>\n"
+        "    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }\n"
+        "    body {\n"
+        '      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;\n'
+        "      background: #f0f4f8;\n"
+        "      color: #1a202c;\n"
+        "      height: 100vh;\n"
+        "      display: flex;\n"
+        "      flex-direction: column;\n"
+        "      overflow: hidden;\n"
+        "    }\n"
+        "    header {\n"
+        "      background: linear-gradient(135deg, #1e4d8c 0%, #2b6cb0 100%);\n"
+        "      color: #fff;\n"
+        "      padding: 13px 22px;\n"
+        "      display: flex;\n"
+        "      align-items: center;\n"
+        "      gap: 13px;\n"
+        "      box-shadow: 0 2px 8px rgba(0,0,0,0.2);\n"
+        "      flex-shrink: 0;\n"
+        "    }\n"
+        "    header svg { flex-shrink: 0; }\n"
+        "    header h1 { font-size: 1.2rem; font-weight: 700; }\n"
+        "    header p  { font-size: 0.77rem; opacity: 0.82; margin-top: 2px; }\n"
+        "    .stats {\n"
+        "      display: flex; flex-wrap: wrap; gap: 8px;\n"
+        "      padding: 10px 18px;\n"
+        "      background: #fff;\n"
+        "      border-bottom: 1px solid #e2e8f0;\n"
+        "      flex-shrink: 0;\n"
+        "    }\n"
+        "    .stat {\n"
+        "      flex: 1 1 90px;\n"
+        "      background: #f7fafc;\n"
+        "      border: 1px solid #e2e8f0;\n"
+        "      border-radius: 10px;\n"
+        "      padding: 7px 12px;\n"
+        "      display: flex; flex-direction: column; align-items: center;\n"
+        "    }\n"
+        "    .stat-value { font-size: 1.1rem; font-weight: 700; color: #2b6cb0; }\n"
+        "    .stat-label { font-size: 0.65rem; color: #718096; text-transform: uppercase;\n"
+        "                  letter-spacing: 0.05em; margin-top: 2px; white-space: nowrap; }\n"
+        "    .main { display: flex; flex-direction: column; flex: 1 1 auto; overflow: hidden; }\n"
+        "    #map  { flex: 1 1 auto; z-index: 0; }\n"
+        "    .elev-panel {\n"
+        "      flex: 0 0 180px;\n"
+        "      background: #fff;\n"
+        "      border-top: 1px solid #e2e8f0;\n"
+        "      padding: 10px 16px 8px;\n"
+        "      display: flex; flex-direction: column;\n"
+        "    }\n"
+        "    .elev-panel h2 {\n"
+        "      font-size: 0.7rem; font-weight: 600; color: #4a5568;\n"
+        "      text-transform: uppercase; letter-spacing: 0.06em;\n"
+        "      margin-bottom: 6px; flex-shrink: 0;\n"
+        "    }\n"
+        "    .elev-wrap { position: relative; flex: 1 1 auto; }\n"
+        "    #elevChart { width: 100% !important; height: 100% !important; }\n"
+        "    .leaflet-popup-content-wrapper { border-radius: 10px; font-size: 0.82rem; }\n"
+        "    .popup b { color: #2b6cb0; }\n"
+        "  </style>\n"
+        "</head>\n"
+        "<body>\n"
+        "\n"
+        "<header>\n"
+        '  <svg width="38" height="38" viewBox="0 0 38 38" fill="none">\n'
+        '    <circle cx="19" cy="19" r="19" fill="rgba(255,255,255,0.15)"/>\n'
+        '    <path d="M19 9C14 9 10 13 10 18C10 24 19 32 19 32C19 32 28 24 28 18C28 13 24 9 19 9Z"\n'
+        '          fill="#fff" opacity="0.9"/>\n'
+        '    <circle cx="19" cy="18" r="4.5" fill="#2b6cb0"/>\n'
+        "  </svg>\n"
+        "  <div>\n"
+        f"    <h1>{track_name}</h1>\n"
+        f"    <p>{stats['date_str']} &nbsp;·&nbsp; {stats['point_count']} точек GPS</p>\n"
+        "  </div>\n"
+        "</header>\n"
+        "\n"
+        '<div class="stats">\n'
+        f'  <div class="stat"><span class="stat-value">{stats["total_dist_km"]:.2f} км</span><span class="stat-label">Расстояние</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">{stats["duration_str"]}</span><span class="stat-label">Длительность</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">{stats["avg_speed_kmh"]:.1f} км/ч</span><span class="stat-label">Ср. скорость</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">{stats["ele_max"]:.0f} м</span><span class="stat-label">Макс. высота</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">{stats["ele_min"]:.0f} м</span><span class="stat-label">Мин. высота</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">+{stats["ascent"]:.0f} м</span><span class="stat-label">Набор высоты</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">−{stats["descent"]:.0f} м</span><span class="stat-label">Сброс высоты</span></div>\n'
+        f'  <div class="stat"><span class="stat-value">{stats["point_count"]}</span><span class="stat-label">Точек трека</span></div>\n'
+        "</div>\n"
+        "\n"
+        '<div class="main">\n'
+        '  <div style="position:relative; flex:1 1 auto; min-height:0;">\n'
+        '    <div id="map" style="height:100%;"></div>\n'
+        "  </div>\n"
+        '  <div class="elev-panel">\n'
+        "    <h2>Профиль высот — наведите курсор для позиции на карте</h2>\n"
+        '    <div class="elev-wrap"><canvas id="elevChart"></canvas></div>\n'
+        "  </div>\n"
+        "</div>\n"
+        "\n"
+        "<script>\n"
+        "// ── Данные трека ─────────────────────────────────────────────────────────\n"
+        f"const LATLNGS = {latlngs_js};\n"
+        f"const ELES    = {eles_js};\n"
+        f"const DIST_KM = {dist_km_js};\n"
+        "\n"
+        "const ELE_MIN = Math.min(...ELES);\n"
+        "const ELE_MAX = Math.max(...ELES);\n"
+        "\n"
+        "// ── Карта на подложке MapBox Light ───────────────────────────────────────\n"
+        "const centerLat = LATLNGS.reduce((s,p) => s+p[0], 0) / LATLNGS.length;\n"
+        "const centerLon = LATLNGS.reduce((s,p) => s+p[1], 0) / LATLNGS.length;\n"
+        "\n"
+        "const map = L.map('map').setView([centerLat, centerLon], 14);\n"
+        "\n"
+        "L.tileLayer(\n"
+        f"  '{mapbox_url}',\n"
+        "  {\n"
+        "    attribution: '© <a href=\"https://www.mapbox.com/about/maps/\">Mapbox</a> "
+        "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a>',\n"
+        "    tileSize: 512,\n"
+        "    zoomOffset: -1,\n"
+        "    maxZoom: 22\n"
+        "  }\n"
+        ").addTo(map);\n"
+        "\n"
+        "// ── Трек с градиентом по высоте ──────────────────────────────────────────\n"
+        "function eleColor(ele) {\n"
+        "  // зелёный (низко) → жёлтый → красный (высоко)\n"
+        "  const t = Math.max(0, Math.min(1, (ele - ELE_MIN) / (ELE_MAX - ELE_MIN || 1)));\n"
+        "  const r = Math.round(30  + t * 210);\n"
+        "  const g = Math.round(180 - t * 140);\n"
+        "  const b = Math.round(60  - t * 40);\n"
+        "  return `rgb(${r},${g},${b})`;\n"
+        "}\n"
+        "\n"
+        "for (let i = 1; i < LATLNGS.length; i++) {\n"
+        "  L.polyline([LATLNGS[i-1], LATLNGS[i]], {\n"
+        "    color:    eleColor(ELES[i]),\n"
+        "    weight:   5,\n"
+        "    opacity:  0.92,\n"
+        "    lineCap:  'round',\n"
+        "    lineJoin: 'round'\n"
+        "  }).addTo(map);\n"
+        "}\n"
+        "\n"
+        "// Тонкая тёмная обводка для читаемости на светлой подложке\n"
+        "L.polyline(LATLNGS, {\n"
+        "  color: 'rgba(0,0,0,0.12)', weight: 7, opacity: 1, lineCap: 'round'\n"
+        "}).addTo(map);\n"
+        "\n"
+        "// ── Маркеры старта / финиша ───────────────────────────────────────────────\n"
+        "function circleIcon(color) {\n"
+        "  return L.divIcon({\n"
+        "    className: '',\n"
+        "    html: `<div style=\"width:16px;height:16px;border-radius:50%;\n"
+        "                background:${color};border:3px solid #fff;\n"
+        "                box-shadow:0 1px 5px rgba(0,0,0,.4)\"></div>`,\n"
+        "    iconAnchor: [8, 8]\n"
+        "  });\n"
+        "}\n"
+        "\n"
+        "L.marker(LATLNGS[0], {icon: circleIcon('#22c55e')}).addTo(map)\n"
+        "  .bindPopup(`<div class=\"popup\"><b>Старт</b><br>\n"
+        "    Высота: ${ELES[0]} м<br>Пройдено: 0.00 км</div>`);\n"
+        "\n"
+        "L.marker(LATLNGS[LATLNGS.length-1], {icon: circleIcon('#ef4444')}).addTo(map)\n"
+        "  .bindPopup(`<div class=\"popup\"><b>Финиш</b><br>\n"
+        "    Высота: ${ELES[ELES.length-1]} м<br>\n"
+        "    Пройдено: ${DIST_KM[DIST_KM.length-1].toFixed(2)} км</div>`);\n"
+        "\n"
+        "map.fitBounds(L.polyline(LATLNGS).getBounds(), {padding: [28, 28]});\n"
+        "\n"
+        "// ── Скользящий маркер (синхронизация карта ↔ график) ─────────────────────\n"
+        "const sliderMarker = L.marker(LATLNGS[0], {\n"
+        "  icon: L.divIcon({\n"
+        "    className: '',\n"
+        "    html: `<div style=\"width:13px;height:13px;border-radius:50%;\n"
+        "                background:#2b6cb0;border:2px solid #fff;\n"
+        "                box-shadow:0 1px 4px rgba(0,0,0,.4)\"></div>`,\n"
+        "    iconAnchor: [6.5, 6.5]\n"
+        "  }),\n"
+        "  interactive: false,\n"
+        "  zIndexOffset: 1000\n"
+        "}).addTo(map);\n"
+        "sliderMarker.setOpacity(0);\n"
+        "\n"
+        "// ── График профиля высот ──────────────────────────────────────────────────\n"
+        "const ctx = document.getElementById('elevChart').getContext('2d');\n"
+        "const gradient = ctx.createLinearGradient(0, 0, 0, 160);\n"
+        "gradient.addColorStop(0,   'rgba(43,108,176,0.35)');\n"
+        "gradient.addColorStop(0.6, 'rgba(43,108,176,0.12)');\n"
+        "gradient.addColorStop(1,   'rgba(43,108,176,0.02)');\n"
+        "\n"
+        "new Chart(ctx, {\n"
+        "  type: 'line',\n"
+        "  data: {\n"
+        "    labels: DIST_KM,\n"
+        "    datasets: [{\n"
+        "      data: ELES,\n"
+        "      borderColor: '#2b6cb0',\n"
+        "      borderWidth: 2,\n"
+        "      backgroundColor: gradient,\n"
+        "      fill: true,\n"
+        "      pointRadius: 0,\n"
+        "      tension: 0.35\n"
+        "    }]\n"
+        "  },\n"
+        "  options: {\n"
+        "    responsive: true,\n"
+        "    maintainAspectRatio: false,\n"
+        "    animation: false,\n"
+        "    interaction: { mode: 'index', intersect: false },\n"
+        "    plugins: {\n"
+        "      legend: { display: false },\n"
+        "      tooltip: {\n"
+        "        callbacks: {\n"
+        "          title: items => parseFloat(items[0].label).toFixed(2) + ' км',\n"
+        "          label: items => 'Высота: ' + items.raw + ' м'\n"
+        "        }\n"
+        "      }\n"
+        "    },\n"
+        "    scales: {\n"
+        "      x: {\n"
+        "        ticks: {\n"
+        "          maxTicksLimit: 9,\n"
+        "          callback: (v) => DIST_KM[v] !== undefined\n"
+        "            ? Number(DIST_KM[v]).toFixed(1) + ' км' : ''\n"
+        "        },\n"
+        "        grid: { color: '#edf2f7' }\n"
+        "      },\n"
+        "      y: {\n"
+        "        ticks: { callback: v => v + ' м', maxTicksLimit: 5 },\n"
+        "        grid: { color: '#edf2f7' }\n"
+        "      }\n"
+        "    },\n"
+        "    onHover: (event, elements) => {\n"
+        "      if (elements.length) {\n"
+        "        const idx = elements[0].index;\n"
+        "        sliderMarker.setLatLng(LATLNGS[idx]);\n"
+        "        sliderMarker.setOpacity(1);\n"
+        "      } else {\n"
+        "        sliderMarker.setOpacity(0);\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "});\n"
+        "</script>\n"
+        "</body>\n"
+        "</html>\n"
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     print(f"✓ HTML сохранён: {out_path}")
-    print(f"  Точек:      {stats['point_count']}")
-    print(f"  Дистанция:  {stats['total_dist_km']:.2f} км")
+    print(f"  Точек:        {stats['point_count']}")
+    print(f"  Дистанция:    {stats['total_dist_km']:.2f} км")
     print(f"  Длительность: {stats['duration_str']}")
-    print(f"  Высоты:     {stats['ele_min']:.0f}–{stats['ele_max']:.0f} м")
+    print(f"  Высоты:       {stats['ele_min']:.0f}–{stats['ele_max']:.0f} м")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,6 +501,18 @@ def main():
 
     if gpx_path.suffix.lower() != ".gpx":
         print(f"Ошибка: ожидается .gpx файл, получен {gpx_path.suffix}")
+        sys.exit(1)
+
+    # Проверяем наличие токена
+    if not MAPBOX_TOKEN:
+        print("Ошибка: переменная окружения MAPBOX_TOKEN не задана.")
+        print("")
+        print("Локально (macOS/Linux):")
+        print('  export MAPBOX_TOKEN="pk.eyJ1Ijoiваш_токен..."')
+        print("")
+        print("GitHub Actions:")
+        print("  Settings → Secrets and variables → Actions → New repository secret")
+        print("  Name: MAPBOX_TOKEN")
         sys.exit(1)
 
     print(f"Обработка: {gpx_path}")

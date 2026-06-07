@@ -1,5 +1,8 @@
 name: GPX → HTML Map
 
+env:
+    MAPBOX_TOKEN: ${{ secrets.MAPBOX_TOKEN }}  # ← новая строка
+
 # Пайплайн запускается автоматически при добавлении или изменении
 # любого .gpx-файла в папке data/
 on:
